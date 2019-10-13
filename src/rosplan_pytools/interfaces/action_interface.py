@@ -76,7 +76,6 @@ def _action_receiver(msg):
                 action.execute(**keyval_to_dict(msg.parameters))
 
         except Exception as e:
-            rospy.logwarn(e)
             rospy.logwarn("[RPpt][AIF] action '%s' failed." % msg.name, exc_info=1)
             feedback.publish(ActionFeedback(msg.action_id,
                                             "action failed",
@@ -206,6 +205,44 @@ class SimpleAction(object):
         else:
             rospy.logwarn("SimpleAction %s [%i] is not paused." %
                           (self.name, self.action_id))
+
+
+class ActionSink(object):
+
+    name = []
+
+    def __init__(self, action_id, dispatch_time, feedback_pub, arguments):
+        self.action_id = action_id
+        self.dispatch_time = dispatch_time
+        self.feedback_pub = feedback_pub
+        self.arguments = arguments
+
+    def _feedback(self, status, info=None):
+        self.feedback_pub.publish(ActionFeedback(self.action_id,
+                                                 status,
+                                                 dict_to_keyval(info)))
+
+    def _report_enabled(self):
+        self._feedback("action enabled")
+
+    def _report_success(self):
+        self._feedback("action achieved")
+
+    def _report_failed(self):
+        self._feedback("action failed")
+
+    def _start(self, action_name, **kwargs):
+        rospy.logwarn("There is supposed to be some code for %s.start()" %
+                      self.name)
+        raise NotImplementedError
+
+    def execute(self, action_name, **kwargs):
+        self._report_enabled()
+        if self._start(action_name, **kwargs):
+            self._report_success()
+        else:
+            self._report_failed()
+
 
 class CheckActionAndProcessEffects(object):
     """
@@ -351,6 +388,91 @@ class CheckActionAndProcessEffects(object):
                 value = self.bound_params[effect.typed_parameters[pdx].key]
                 effect_value[key] = value
             kb.add_predicate(effect_name, **effect_value)
+
+
+class Action(object):
+    """
+    Receives an action from ROSPlan, automatically sending feedback.
+    Extend and set the 'name' attribute (not 'self.name') to define the action.
+
+    IMPORTANT: You DON'T have to check parameters (pre-conditions) neither set
+    effects (or post-conditions) in your code. As this class set effects by
+    itself in case the action does not fail.
+    """
+    name = ""
+
+    def __init__(self, action_id, dispatch_time, feedback_pub, arguments):
+        self.action_id = action_id
+        self.dispatch_time = dispatch_time
+        self.feedback_pub = feedback_pub
+        self.arguments = arguments
+        self.status = "Ready"
+        self._report_enabled()
+
+    def _feedback(self, status, info=None):
+        self.feedback_pub.publish(ActionFeedback(self.action_id,
+                                                 status,
+                                                 dict_to_keyval(info)))
+
+    def _report_enabled(self):
+        self._feedback("action enabled")
+
+    def _report_success(self):
+        self._feedback("action achieved")
+
+    def _report_failed(self):
+        self._feedback("action failed")
+
+    def _start(self, **kwargs):
+        """
+        Runs the given task. An exception here will report 'fail', and a
+        completion will report success.
+          
+        NOTE: You should make sure long-running functions can be interrupted
+        with cancel(). If cancelled, you should generate an exception of some 
+        sort (unless you succeed?)
+        """
+
+        rospy.logwarn("There is supposed to be some code for %s.execute()" %
+                      self.name)
+        raise NotImplementedError
+
+    def execute(self, **kwargs):
+
+        checker = CheckActionAndProcessEffects(self.__class__.name)
+
+        if not checker.validate_parameters(kwargs):
+            raise ValueError("Action arguments are incorrect")
+
+        if not self._start(**kwargs):
+            return False
+
+        checker.apply_effects()
+        return True
+
+    def cancel(self):
+        rospy.logwarn("Action %s [%i] has no cancel method." %
+                      (self.name, self.action_id))
+        self.status = "Cancelled"
+
+    def pause(self):
+        rospy.logwarn("Action %s [%i] has no pause method. Cancelling." %
+                      (self.name, self.action_id))
+        self.status = "Paused"
+        self.cancel()
+
+    def resume(self):
+        rospy.logwarn("Action %s [%i] has no resume method." %
+                      (self.name, self.action_id))
+        if self.status == "Paused":
+            rospy.logwarn("Action %s [%i] is restarting." %
+                          (self.name, self.action_id))
+            self._start(**self.arguments)
+            self.status = "Resumed"
+        else:
+            rospy.logwarn("Action %s [%i] is not paused." %
+                          (self.name, self.action_id))
+
 
 def planner_simple_action(action_name):
     """
